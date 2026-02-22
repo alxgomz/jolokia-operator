@@ -26,15 +26,16 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
-
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-
 	"github.com/alxgomz/jolokia-operator/test/utils"
 )
 
 // namespace where the project is deployed in
 const namespace = "jolokia-operator-system"
+
+// testNamespace is where webhook test Pods are created (must not be excluded by namespaceSelector)
+const testNamespace = "default"
 
 // serviceAccountName created for the project
 const serviceAccountName = "jolokia-operator-controller-manager"
@@ -343,16 +344,248 @@ var _ = Describe("Manager", Ordered, func() {
 		})
 
 		// +kubebuilder:scaffold:e2e-webhooks-checks
+	})
 
-		// TODO: Customize the e2e test suite with scenarios specific to your project.
-		// Consider applying sample/CR(s) and check their status and/or verifying
-		// the reconciliation by using the metrics, i.e.:
-		// metricsOutput, err := getMetricsOutput()
-		// Expect(err).NotTo(HaveOccurred(), "Failed to retrieve logs from curl pod")
-		// Expect(metricsOutput).To(ContainSubstring(
-		//    fmt.Sprintf(`controller_runtime_reconcile_total{controller="%s",result="success"} 1`,
-		//    strings.ToLower(<Kind>),
-		// ))
+	Context("Webhook", func() {
+		const sidecarName = "jolokia-agent"
+		const volumeName = "jolokia-tmp"
+
+		AfterEach(func() {
+			// Clean up any test pods left in the test namespace
+			for _, name := range []string{
+				"test-basic-injection",
+				"test-invalid-annotation",
+				"test-no-annotations",
+				"test-full-config",
+			} {
+				cmd := exec.Command("kubectl", "delete", "pod", name,
+					"-n", testNamespace, "--ignore-not-found", "--grace-period=0", "--force")
+				_, _ = utils.Run(cmd)
+			}
+		})
+
+		It("should inject sidecar into Pod with valid annotations", func() {
+			podName := "test-basic-injection"
+
+			By("creating a Pod with valid Jolokia annotations")
+			cmd := exec.Command("kubectl", "run", podName,
+				"--namespace", testNamespace,
+				"--image=busybox:latest",
+				"--restart=Never",
+				"--overrides", `{
+					"metadata": {
+						"annotations": {
+							"jolokia.horoa.net/port": "8778",
+							"jolokia.horoa.net/host": "0.0.0.0"
+						}
+					},
+					"spec": {
+						"containers": [{
+							"name": "app",
+							"image": "busybox:latest",
+							"command": ["sleep", "3600"]
+						}]
+					}
+				}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create test Pod")
+
+			By("verifying the sidecar init container was injected")
+			verifySidecar := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", podName,
+					"-n", testNamespace,
+					"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].name}", sidecarName))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(sidecarName), "Sidecar container not found")
+			}
+			Eventually(verifySidecar).Should(Succeed())
+
+			By("verifying shareProcessNamespace is set to true")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", "jsonpath={.spec.shareProcessNamespace}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("true"), "shareProcessNamespace not set")
+
+			By("verifying the emptyDir volume was added")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.volumes[?(@.name==\"%s\")].name}", volumeName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal(volumeName), "Volume not found")
+
+			By("verifying the sidecar has SYS_PTRACE capability")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].securityContext.capabilities.add}", sidecarName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("SYS_PTRACE"), "SYS_PTRACE capability not found")
+
+			By("verifying the sidecar args contain the Jolokia options")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].args}", sidecarName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("host=0.0.0.0"), "host arg not found")
+			Expect(output).To(ContainSubstring("port=8778"), "port arg not found")
+		})
+
+		It("should reject Pod with invalid Jolokia annotation", func() {
+			podName := "test-invalid-annotation"
+
+			By("creating a Pod with an invalid Jolokia annotation key")
+			cmd := exec.Command("kubectl", "run", podName,
+				"--namespace", testNamespace,
+				"--image=busybox:latest",
+				"--restart=Never",
+				"--overrides", `{
+					"metadata": {
+						"annotations": {
+							"jolokia.horoa.net/invalidOption": "value"
+						}
+					},
+					"spec": {
+						"containers": [{
+							"name": "app",
+							"image": "busybox:latest",
+							"command": ["sleep", "3600"]
+						}]
+					}
+				}`)
+			_, err := utils.Run(cmd)
+			Expect(err).To(HaveOccurred(), "Pod with invalid annotation should be rejected")
+		})
+
+		It("should not inject sidecar into Pod without Jolokia annotations", func() {
+			podName := "test-no-annotations"
+
+			By("creating a Pod without Jolokia annotations")
+			cmd := exec.Command("kubectl", "run", podName,
+				"--namespace", testNamespace,
+				"--image=busybox:latest",
+				"--restart=Never",
+				"--command", "--", "sleep", "3600")
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create Pod without annotations")
+
+			By("verifying no sidecar init container was injected")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", "jsonpath={.spec.initContainers}")
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).NotTo(ContainSubstring(sidecarName),
+				"Sidecar should not be injected into Pod without annotations")
+
+			By("verifying shareProcessNamespace is not set")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", "jsonpath={.spec.shareProcessNamespace}")
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(BeEmpty(), "shareProcessNamespace should not be set")
+		})
+
+		It("should inject fully configured sidecar with resource, mount, and target-process annotations", func() {
+			podName := "test-full-config"
+
+			By("creating a Pod with all Jolokia annotations")
+			cmd := exec.Command("kubectl", "run", podName,
+				"--namespace", testNamespace,
+				"--image=busybox:latest",
+				"--restart=Never",
+				"--overrides", `{
+					"metadata": {
+						"annotations": {
+							"jolokia.horoa.net/port": "8778",
+							"jolokia.horoa.net/host": "0.0.0.0",
+							"jolokia.horoa.net/rsc-limits-cpu": "200m",
+							"jolokia.horoa.net/rsc-limits-memory": "128Mi",
+							"jolokia.horoa.net/rsc-requests-cpu": "50m",
+							"jolokia.horoa.net/rsc-requests-memory": "64Mi",
+							"jolokia.horoa.net/mnt": "/opt/jolokia",
+							"jolokia.horoa.net/target-process": "com.example.MainApp"
+						}
+					},
+					"spec": {
+						"containers": [{
+							"name": "app",
+							"image": "busybox:latest",
+							"command": ["sleep", "3600"]
+						}]
+					}
+				}`)
+			_, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred(), "Failed to create test Pod")
+
+			By("verifying the sidecar init container was injected")
+			verifySidecar := func(g Gomega) {
+				cmd := exec.Command("kubectl", "get", "pod", podName,
+					"-n", testNamespace,
+					"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].name}", sidecarName))
+				output, err := utils.Run(cmd)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(output).To(Equal(sidecarName), "Sidecar container not found")
+			}
+			Eventually(verifySidecar).Should(Succeed())
+
+			By("verifying the custom mount path")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].volumeMounts[?(@.name==\"%s\")].mountPath}",
+					sidecarName, volumeName))
+			output, err := utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("/opt/jolokia"), "Custom mount path not applied")
+
+			By("verifying the sidecar resource limits")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].resources.limits.cpu}", sidecarName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("200m"), "CPU limit not applied")
+
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].resources.limits.memory}", sidecarName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("128Mi"), "Memory limit not applied")
+
+			By("verifying the sidecar resource requests")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].resources.requests.cpu}", sidecarName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("50m"), "CPU request not applied")
+
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].resources.requests.memory}", sidecarName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(Equal("64Mi"), "Memory request not applied")
+
+			By("verifying the sidecar args contain Jolokia options and not operator-specific ones")
+			cmd = exec.Command("kubectl", "get", "pod", podName,
+				"-n", testNamespace,
+				"-o", fmt.Sprintf("jsonpath={.spec.initContainers[?(@.name==\"%s\")].args}", sidecarName))
+			output, err = utils.Run(cmd)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(output).To(ContainSubstring("host=0.0.0.0"), "host arg not found")
+			Expect(output).To(ContainSubstring("port=8778"), "port arg not found")
+			// Operator-specific annotations must NOT appear in args
+			Expect(output).NotTo(ContainSubstring("rsc-limits"), "Resource annotation leaked into args")
+			Expect(output).NotTo(ContainSubstring("mnt="), "Mount annotation leaked into args")
+			Expect(output).NotTo(ContainSubstring("target-process="), "Target process annotation leaked into args")
+		})
 	})
 })
 

@@ -1,0 +1,30 @@
+# Sample Pod with Jolokia sidecar injection annotations.
+# The jolokia-operator mutating webhook will inject:
+#   - A Jolokia agent init sidecar container (restartPolicy: Always)
+#   - An emptyDir volume "jolokia-tmp" mounted at /tmp (or the path from jolokia.horoa.net/mnt)
+#   - shareProcessNamespace: true
+#   - SYS_PTRACE capability on the sidecar
+apiVersion: v1
+kind: Pod
+metadata:
+  name: my-java-app
+  annotations:
+    # Jolokia agent configuration (passed as key=value args to the agent)
+    jolokia.horoa.net/port: "8778"
+    jolokia.horoa.net/host: "0.0.0.0"
+    # Uncomment to customize resource allocation for the sidecar:
+    # jolokia.horoa.net/rsc-limits-cpu: "200m"
+    # jolokia.horoa.net/rsc-limits-memory: "128Mi"
+    # jolokia.horoa.net/rsc-requests-cpu: "50m"
+    # jolokia.horoa.net/rsc-requests-memory: "64Mi"
+    # Uncomment to set a custom mount path (default: /tmp):
+    # jolokia.horoa.net/mnt: "/opt/jolokia"
+    # Uncomment to specify the target Java process (PID or class name):
+    # jolokia.horoa.net/target-process: "com.example.MainApp"
+    # Uncomment to override the sidecar container image:
+    # jolokia.horoa.net/sidecar-image: "ghcr.io/alxgomz/jolokia-agent:2"
+spec:
+  containers:
+    - name: app
+      image: openjdk:21-slim
+      command: ["java", "-jar", "/app.jar"]
