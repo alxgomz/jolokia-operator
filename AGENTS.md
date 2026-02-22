@@ -318,3 +318,10 @@ make docker-build docker-push IMG=$IMG
 - **controller-runtime**: https://github.com/kubernetes-sigs/controller-runtime
 - **controller-tools**: https://github.com/kubernetes-sigs/controller-tools
 - **Kubebuilder Repo**: https://github.com/kubernetes-sigs/kubebuilder
+
+## Active Technologies
+- Go 1.25.3 (as specified in `go.mod`) + `sigs.k8s.io/controller-runtime` v0.23.1, `k8s.io/api` v0.35.0, `k8s.io/apimachinery` v0.35.0, `k8s.io/client-go` v0.35.0 (001-jolokia-sidecar-injection)
+- N/A (no persistent state — webhook is stateless) (001-jolokia-sidecar-injection)
+
+## Recent Changes
+- 001-jolokia-sidecar-injection: Added Go 1.25.3 (as specified in `go.mod`) + `sigs.k8s.io/controller-runtime` v0.23.1, `k8s.io/api` v0.35.0, `k8s.io/apimachinery` v0.35.0, `k8s.io/client-go` v0.35.0
