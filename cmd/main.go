@@ -82,6 +82,10 @@ func main() {
 		Development: true,
 	}
 	opts.BindFlags(flag.CommandLine)
+	var sidecarImage string
+	flag.StringVar(&sidecarImage, "sidecar-image", "ghcr.io/alxgomz/jolokia-agent:2",
+		"Default container image for the Jolokia agent sidecar.")
+
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
@@ -186,7 +190,7 @@ func main() {
 	}
 	// nolint:goconst
 	if os.Getenv("ENABLE_WEBHOOKS") != "false" {
-		if err := webhookv1.SetupPodWebhookWithManager(mgr); err != nil {
+		if err := webhookv1.SetupPodWebhookWithManager(mgr, sidecarImage); err != nil {
 			setupLog.Error(err, "Failed to create webhook", "webhook", "Pod")
 			os.Exit(1)
 		}
